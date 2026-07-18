@@ -1,17 +1,14 @@
 {
   "name": "esp32-dashboard",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Servidor para dashboard de sensores ESP32 con Socket.IO y Postgres",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node index.js"
+    "start": "node server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "express": "^5.2.1",
-    "socket.io": "^4.8.3"
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5",
+    "pg": "^8.12.0"
   }
 }
