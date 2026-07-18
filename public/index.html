@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 3 Gráficas</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #eef2f5; text-align: center; margin: 0; padding: 20px; }
+        h1 { color: #333; margin-bottom: 30px; }
+        .dashboard-container { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; max-width: 1400px; margin: 0 auto; }
+        .chart-box { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 6px 15px rgba(0,0,0,0.1); flex: 1; min-width: 350px; max-width: 420px; box-sizing: border-box; }
+        .card-data { border-bottom: 2px solid #eee; margin-bottom: 15px; padding-bottom: 10px; }
+        .card-data h2 { margin: 0; color: #555; font-size: 18px; text-transform: uppercase; letter-spacing: 1px; }
+        .card-data p { font-size: 36px; font-weight: bold; margin: 5px 0 0 0; color: #007bff; }
+        canvas { width: 100% !important; height: 250px !important; }
+
+        /* --- Estilos del indicador de peligro --- */
+        .peligro-box { max-width: 900px; margin: 0 auto 25px auto; }
+        .peligro-card {
+            background: white;
+            padding: 18px 25px;
+            border-radius: 12px;
+            box-shadow: 0 6px 15px rgba(0,0,0,0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+            border-left: 10px solid #ccc;
+            transition: border-color 0.4s ease, background-color 0.4s ease;
+        }
+        .peligro-card h2 { margin: 0; font-size: 18px; color: #555; text-transform: uppercase; letter-spacing: 1px; }
+        #nivelPeligro { font-size: 26px; font-weight: bold; margin: 0; transition: color 0.4s ease; }
+
+        /* Niveles: se aplican dinámicamente vía JS, aquí solo definimos las clases */
+        .nivel-bueno   { color: #2ecc71; }
+        .nivel-moderado{ color: #f1c40f; }
+        .nivel-malo    { color: #e67e22; }
+        .nivel-peligro { color: #e74c3c; }
+
+        .peligro-card.nivel-bueno-border   { border-left-color: #2ecc71; }
+        .peligro-card.nivel-moderado-border{ border-left-color: #f1c40f; }
+        .peligro-card.nivel-malo-border    { border-left-color: #e67e22; }
+        .peligro-card.nivel-peligro-border { border-left-color: #e74c3c; }
+    </style>
+</head>
+<body>
+
+    <h1>Estación de Monitoreo - 3 Canales</h1>
+
+    <!-- Indicador de nivel de peligro -->
+    <div class="peligro-box">
+        <div class="peligro-card" id="peligroCard">
+            <h2>Nivel de Peligro:</h2>
+            <p id="nivelPeligro">-- Esperando datos --</p>
+        </div>
+    </div>
+
+    <div class="dashboard-container">
+        
+        <div class="chart-box">
+            <div class="card-data">
+                <h2>Temperatura</h2>
+                <p id="temp">-- °C</p>
+            </div>
+            <canvas id="tempChart"></canvas>
+        </div>
+
+        <div class="chart-box">
+            <div class="card-data">
+                <h2>Humedad</h2>
+                <p id="hum">-- %</p>
+            </div>
+            <canvas id="humChart"></canvas>
+        </div>
+
+        <div class="chart-box">
+            <div class="card-data">
+                <h2>Calidad Aire (Gas)</h2>
+                <p id="gas">--</p>
+            </div>
+            <canvas id="gasChart"></canvas>
+        </div>
+
+    </div>
+
+    <script>
+        // Forzamos conexión explícita
+        const socket = io();
+        const MAX_PUNTOS = 15; // Mostramos más puntos para ver mejor la línea
+
+        // --- UMBRALES PARA SENSOR MQ-135 (calidad de aire: CO2, NH3, benceno, humo) ---
+        // Estos valores asumen lectura analógica cruda del ESP32 (analogRead, rango 0-4095).
+        // Son valores de referencia general: el MQ-135 varía bastante según la resistencia
+        // de carga (RL), el tiempo de precalentamiento (~24-48h) y la calibración con tu
+        // propio aire limpio. IMPORTANTE: deja el sensor precalentando unos minutos antes
+        // de confiar en las lecturas, y ajusta estos números observando tus propios valores
+        // en aire limpio (ventana abierta) vs. cerca de una fuente de gas/humo.
+        const UMBRALES_GAS = {
+            bueno:    800,    // valor <= bueno      -> "Aire limpio"
+            moderado: 1500,   // valor <= moderado   -> "Moderado"
+            malo:     2500    // valor <= malo       -> "Malo"
+                               // valor > malo        -> "¡PELIGRO!"
+        };
+
+        function calcularPeligro(valorGas) {
+            if (valorGas <= UMBRALES_GAS.bueno) {
+                return { texto: "✅ Aire limpio", clase: "bueno" };
+            } else if (valorGas <= UMBRALES_GAS.moderado) {
+                return { texto: "⚠️ Moderado", clase: "moderado" };
+            } else if (valorGas <= UMBRALES_GAS.malo) {
+                return { texto: "🟠 Aire malo", clase: "malo" };
+            } else {
+                return { texto: "🚨 ¡PELIGRO! Ventilar", clase: "peligro" };
+            }
+        }
+
+        function actualizarPeligro(valorGas) {
+            const { texto, clase } = calcularPeligro(valorGas);
+            const nivelEl = document.getElementById('nivelPeligro');
+            const cardEl = document.getElementById('peligroCard');
+
+            // Quitar clases anteriores
+            nivelEl.className = '';
+            cardEl.classList.remove('nivel-bueno-border', 'nivel-moderado-border', 'nivel-malo-border', 'nivel-peligro-border');
+
+            // Aplicar clases nuevas
+            nivelEl.classList.add('nivel-' + clase);
+            cardEl.classList.add('nivel-' + clase + '-border');
+
+            nivelEl.innerText = texto + " (" + valorGas + ")";
+        }
+
+        // Función auxiliar para crear la configuración de cada gráfica rápidamente
+        function crearConfig(etiqueta, colorBorde, colorFondo) {
+            return {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: etiqueta,
+                        data: [],
+                        borderColor: colorBorde, // Color de la línea
+                        backgroundColor: colorFondo, // Color del área bajo la línea
+                        borderWidth: 3, // Línea más gruesa para que se vea
+                        tension: 0.3, // Curvatura suave
+                        fill: true, // Rellenar el fondo
+                        pointRadius: 2 // Ocultar puntos pequeños
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } }, // Ocultar leyenda para ahorrar espacio
+                    scales: {
+                        x: { display: true, title: { display: true, text: 'Tiempo' } },
+                        y: { display: true, beginAtZero: false } // beginAtZero en false para sensores
+                    }
+                }
+            };
+        }
+
+        // Inicializar las 3 gráficas con colores claros y visibles
+        const chartTemp = new Chart(document.getElementById('tempChart'), crearConfig('Temp', '#ff6384', 'rgba(255, 99, 132, 0.2)'));
+        const chartHum = new Chart(document.getElementById('humChart'), crearConfig('Hum', '#36a2eb', 'rgba(54, 162, 235, 0.2)'));
+        const chartGas = new Chart(document.getElementById('gasChart'), crearConfig('Gas', '#cc65fe', 'rgba(204, 101, 254, 0.2)'));
+
+        // Función para actualizar los datos de una gráfica específica
+        function añadirDato(chart, label, valor) {
+            if (chart.data.labels.length > MAX_PUNTOS) {
+                chart.data.labels.shift(); // Quitar el más viejo
+                chart.data.datasets[0].data.shift();
+            }
+            chart.data.labels.push(label); // Añadir el nuevo
+            chart.data.datasets[0].data.push(valor);
+            chart.update('none'); // Actualizar sin animación para mayor suavidad
+        }
+
+        // Escuchar datos del servidor
+        socket.on('sensorData', (data) => {
+            console.log("Datos recibidos:", data); // Verificación en consola
+
+            // 1. Actualizar textos superiores
+            document.getElementById('temp').innerText = data.temperatura.toFixed(1) + " °C";
+            document.getElementById('hum').innerText = data.humedad.toFixed(1) + " %";
+            document.getElementById('gas').innerText = data.gas;
+
+            // 2. Actualizar indicador de peligro
+            actualizarPeligro(data.gas);
+
+            // 3. Actualizar las 3 líneas
+            const hora = data.timestamp;
+            añadirDato(chartTemp, hora, data.temperatura);
+            añadirDato(chartHum, hora, data.humedad);
+            añadirDato(chartGas, hora, data.gas);
+        });
+
+        // Verificación de conexión
+        socket.on('connect', () => console.log("WebSocket Conectado exitosamente."));
+    </script>
+</body>
+</html>
